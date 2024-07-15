@@ -297,6 +297,7 @@ int main(int argc, char **argv) {
 // initialize marching cubes
 ////////////////////////////////////////////////////////////////////////////////
 void initMC(int argc, char **argv) {
+  printf("Starting `initMC`");
   sycl::queue q;
   // parse command line arguments
   int n;
@@ -344,6 +345,7 @@ void initMC(int argc, char **argv) {
 
 #if SAMPLE_VOLUME
   // load volume data
+  printf("Loading volume data\n");
   char *path = sdkFindFilePath(volumeFilename, argv[0]);
 
   if (path == nullptr) {
@@ -351,14 +353,19 @@ void initMC(int argc, char **argv) {
 
     exit(EXIT_FAILURE);
   }
+  printf("Setting grid size\n");
 
   int size = gridSize.x() * gridSize.y() * gridSize.z() * sizeof(uchar);
   uchar *volume = loadRawFile(path, size);
+
+  printf("Setting device memory\n");
   d_volume = static_cast<uchar *>(sycl::malloc_device(size, q));
   q.memcpy(d_volume, volume, size).wait();
   free(volume);
 
+  printf("Starting `createVolumeTexture`\n");
   createVolumeTexture(d_volume, size);
+  printf("Finished loading volume data");
 #endif
 
   if (g_bValidate) {
@@ -376,6 +383,8 @@ void initMC(int argc, char **argv) {
   d_voxelOccupied = static_cast<uint *>(sycl::malloc_device(memSize, q));
   d_voxelOccupiedScan = static_cast<uint *>(sycl::malloc_device(memSize, q));
   d_compVoxelArray = static_cast<uint *>(sycl::malloc_device(memSize, q));
+
+  printf("Finished `initMC`");
 }
 
 void cleanup() {
@@ -407,8 +416,13 @@ void cleanup() {
 ////////////////////////////////////////////////////////////////////////////////
 void computeIsosurface() {
   sycl::queue q;
-  int threads = 128;
-  sycl::range<3> grid(numVoxels / threads, 1, 1);
+  int maxThreadsPerBlock = 1024;
+  int threads = std::min(128, maxThreadsPerBlock);
+  int numBlocks = (numVoxels + threads - 1) / threads;
+
+  numBlocks = std::min(numBlocks, 65535);
+
+  sycl::range<3> grid(numBlocks, 1, 1);
   sycl::range<3> threads_range(threads, 1, 1);
 
   // get around maximum grid size of 65535 in each dimension
@@ -416,11 +430,12 @@ void computeIsosurface() {
     grid[1] = grid[0] / 32768;
     grid[0] = 32768;
   }
-
+  printf("Starting `launch_classifyVoxel`");
   // calculate number of vertices need per voxel
   launch_classifyVoxel(q, grid, threads_range, d_voxelVerts, d_voxelOccupied, d_volume,
                        gridSize, gridSizeShift, gridSizeMask, numVoxels,
                        voxelSize, isoValue);
+  printf("Finished `launch_classifyVoxel`");
 #if DEBUG_BUFFERS
   printf("voxelVerts:\n");
   dumpBuffer(d_voxelVerts, numVoxels, sizeof(uint));
