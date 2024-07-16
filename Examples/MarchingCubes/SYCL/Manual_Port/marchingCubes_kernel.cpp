@@ -85,9 +85,11 @@ void classifyVoxel(uint *voxelVerts, uint *voxelOccupied, uchar *volume,
                    sycl::float3 voxelSize, float isoValue,
                    sycl::accessor<uint, 1, sycl::access_mode::read> numVertsAcc,
                    sycl::accessor<uchar, 1, sycl::access_mode::read> volumeAcc,
-                   sycl::nd_item<3> item_ct1) {
-  uint blockId = item_ct1.get_group(1) * item_ct1.get_group_range(2) + item_ct1.get_group(2);
-  uint i = blockId * item_ct1.get_local_range(2) + item_ct1.get_local_id(2);
+                   //sycl::nd_item<3> item_ct1)
+		   sycl::id<3> idx) {
+  //uint blockId = item_ct1.get_group(1) * item_ct1.get_group_range(2) + item_ct1.get_group(2);
+  //uint i = blockId * item_ct1.get_local_range(2) + item_ct1.get_local_id(2);
+  uint i = idx[2] * gridSize.x() * gridSize.y() + idx[1] * gridSize.x() + idx[0];
 
   sycl::uint3 gridPos = calcGridPos(i, gridSizeShift, gridSizeMask);
 
@@ -119,51 +121,54 @@ void classifyVoxel(uint *voxelVerts, uint *voxelOccupied, uchar *volume,
   }
 }
 
-extern "C" void launch_classifyVoxel(sycl::queue &q, sycl::range<3> grid,
-                                     sycl::range<3> threads, uint *voxelVerts,
-                                     uint *voxelOccupied, uchar *volume,
-                                     sycl::uint3 gridSize,
-                                     sycl::uint3 gridSizeShift,
+extern "C" void launch_classifyVoxel(sycl::queue &q, sycl::range<3> globalRange,
+                                     uint *voxelVerts, uint *voxelOccupied, uchar *volume,
+                                     sycl::uint3 gridSize, sycl::uint3 gridSizeShift,
                                      sycl::uint3 gridSizeMask, uint numVoxels,
                                      sycl::float3 voxelSize, float isoValue) {
   q.submit([&](sycl::handler &h) {
+    auto out = sycl::stream(1024, 768, h);
     auto numVertsAcc = numVertsTableBuf -> get_access<sycl::access_mode::read>(h);
     auto volumeAcc = volumeBuf -> get_access<sycl::access_mode::read>(h);
+    
+    //out << "voxelVerts before kernel execution:\n[";
+    //for (uint i = 0; i < numVoxels; ++i) {
+    //  out << voxelVerts[i] << " ";
+    //}
+    //out << "]\n";
 
-    h.parallel_for(
-        sycl::nd_range<3>(grid * threads, threads),
-        [=](sycl::nd_item<3> item_ct1) {
+    h.parallel_for(globalRange, [=](sycl::id<3> idx) {
           classifyVoxel(voxelVerts, voxelOccupied, volume, gridSize,
                         gridSizeShift, gridSizeMask, numVoxels, voxelSize,
-                        isoValue, numVertsAcc, volumeAcc, item_ct1);
+                        isoValue, numVertsAcc, volumeAcc, idx);
         });
+
+    //out << "voxelVerts after kernel execution:\n[";
+    //for (uint i = 0; i < numVoxels; ++i) {
+    //  out << voxelVerts[i] << " ";
+    //}
+    //out << "]\n";
   }).wait();
 }
 
 void compactVoxels(uint *compactedVoxelArray, uint *voxelOccupied,
-                   uint *voxelOccupiedScan, uint numVoxels,
-                   sycl::nd_item<3> item_ct1) {
-  uint blockId = item_ct1.get_group(1) * item_ct1.get_group_range(2) + item_ct1.get_group(2);
-  uint i = blockId * item_ct1.get_local_range(2) + item_ct1.get_local_id(2);
-
-  if (voxelOccupied[i] && (i < numVoxels)) {
+                   uint *voxelOccupiedScan, uint numVoxels, sycl::id<3> idx) {
+  //uint blockId = item_ct1.get_group(1) * item_ct1.get_group_range(2) + item_ct1.get_group(2);
+  //uint i = blockId * item_ct1.get_local_range(2) + item_ct1.get_local_id(2);
+  uint i = idx[2] * numVoxels * numVoxels + idx[1] * numVoxels + idx[0];
+  if (i >= numVoxels) return;
+  
+  if (voxelOccupied[i]) {
     compactedVoxelArray[voxelOccupiedScan[i]] = i;
   }
 }
 
-extern "C" void launch_compactVoxels(sycl::queue &q, sycl::range<3> grid,
-                                     sycl::range<3> threads,
-                                     uint *compactedVoxelArray,
-                                     uint *voxelOccupied,
+extern "C" void launch_compactVoxels(sycl::queue &q, sycl::range<3> globalRange,
+                                     uint *compactedVoxelArray, uint *voxelOccupied,
                                      uint *voxelOccupiedScan, uint numVoxels) {
-  q.submit([&](sycl::handler &h) {
-    h.parallel_for(
-        sycl::nd_range<3>(grid * threads, threads),
-        [=](sycl::nd_item<3> item_ct1) {
-          compactVoxels(compactedVoxelArray, voxelOccupied,
-                        voxelOccupiedScan, numVoxels, item_ct1);
-        });
-  }).wait();
+  q.parallel_for(globalRange, [=](sycl::id<3> idx) {
+          compactVoxels(compactedVoxelArray, voxelOccupied, voxelOccupiedScan, numVoxels, idx);
+        }).wait();
 }
 
 sycl::float3 vertexInterp(float isolevel, sycl::float3 p0, sycl::float3 p1, float f0, float f1) {
@@ -186,13 +191,12 @@ void generateTriangles(sycl::float4 *pos, sycl::float4 *norm, uint *compactedVox
                        uint activeVoxels, uint maxVerts,
                        sycl::accessor<uint, 1, sycl::access_mode::read> triTableAcc,
                        sycl::accessor<uint, 1, sycl::access_mode::read> numVertsAcc,
-                       sycl::nd_item<3> item_ct1) {
-  uint blockId = item_ct1.get_group(1) * item_ct1.get_group_range(2) + item_ct1.get_group(2);
-  uint i = blockId * item_ct1.get_local_range(2) + item_ct1.get_local_id(2);
-
-  if (i > activeVoxels - 1) {
-    i = activeVoxels - 1;
-  }
+                       sycl::id<3> idx) {
+  //uint blockId = item_ct1.get_group(1) * item_ct1.get_group_range(2) + item_ct1.get_group(2);
+  //uint i = blockId * item_ct1.get_local_range(2) + item_ct1.get_local_id(2);
+  uint i = idx[2] * gridSize.x() * gridSize.y() + idx[1] * gridSize.x() + idx[0];
+	
+  if (i >= activeVoxels) return;
 
   uint voxel = compactedVoxelArray[i];
 
@@ -263,25 +267,21 @@ void generateTriangles(sycl::float4 *pos, sycl::float4 *norm, uint *compactedVox
   }
 }
 
-extern "C" void launch_generateTriangles(sycl::queue &q, sycl::range<3> grid,
-                                         sycl::range<3> threads, sycl::float4 *pos,
-                                         sycl::float4 *norm, uint *compactedVoxelArray,
-                                         uint *numVertsScanned, sycl::uint3 gridSize,
-                                         sycl::uint3 gridSizeShift,
-                                         sycl::uint3 gridSizeMask,
-                                         sycl::float3 voxelSize, float isoValue,
-                                         uint activeVoxels, uint maxVerts) {
+extern "C" void launch_generateTriangles(sycl::queue &q, sycl::range<3> globalRange,
+                                         sycl::float4 *pos, sycl::float4 *norm, 
+					 uint *compactedVoxelArray, uint *numVertsScanned, 
+					 sycl::uint3 gridSize, sycl::uint3 gridSizeShift,
+                                         sycl::uint3 gridSizeMask, sycl::float3 voxelSize,
+					 float isoValue, uint activeVoxels, uint maxVerts) {
   q.submit([&](sycl::handler &h) {
     auto triTableAcc = triTableBuf->get_access<sycl::access_mode::read>(h);
     auto numVertsAcc = numVertsTableBuf->get_access<sycl::access_mode::read>(h);
 
-    h.parallel_for(
-        sycl::nd_range<3>(grid * threads, threads),
-        [=](sycl::nd_item<3> item_ct1) {
+    h.parallel_for(globalRange, [=](sycl::id<3> idx) {
           generateTriangles(pos, norm, compactedVoxelArray, numVertsScanned,
                             gridSize, gridSizeShift, gridSizeMask, voxelSize,
                             isoValue, activeVoxels, maxVerts, triTableAcc,
-                            numVertsAcc, item_ct1);
+                            numVertsAcc, idx);
         });
   }).wait();
 }

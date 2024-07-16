@@ -93,27 +93,22 @@
 
 #include "defines.h"
 
-extern "C" void launch_classifyVoxel(sycl::queue &q, sycl::range<3> grid,
-				     sycl::range<3> threads, uint *voxelVerts,
-				     uint *voxelOccupied, uchar *volume,
+extern "C" void launch_classifyVoxel(sycl::queue &q, sycl::range<3> globalRange,
+				     uint *voxelVerts, uint *voxelOccupied, uchar *volume,
 				     sycl::uint3 gridSize, sycl::uint3 gridSizeShift,
 				     sycl::uint3 gridSizeMask, uint numVoxels,
 				     sycl::float3 voxelSize, float isoValue);
 
-extern "C" void launch_compactVoxels(sycl::queue &q, sycl::range<3> grid,
-				     sycl::range<3> threads,
-                                     uint *compactedVoxelArray,
-                                     uint *voxelOccupied,
+extern "C" void launch_compactVoxels(sycl::queue &q, sycl::range<3> globalRange,
+                                     uint *compactedVoxelArray, uint *voxelOccupied,
                                      uint *voxelOccupiedScan, uint numVoxels);
 
-extern "C" void launch_generateTriangles(sycl::queue &q, sycl::range<3> grid,
-					 sycl::range<3> threads, float4 *pos,
-					 float4 *norm, uint *compactedVoxelArray,
-					 uint *numVertsScanned, sycl::uint3 gridSize,
-					 sycl::uint3 gridSizeShift,
-					 sycl::uint3 gridSizeMask,
-					 sycl::float3 voxelSize, float isoValue,
-					 uint activeVoxels, uint maxVerts);
+extern "C" void launch_generateTriangles(sycl::queue &q, sycl::range<3> globalRange,
+					 float4 *pos, float4 *norm,
+					 uint *compactedVoxelArray,uint *numVertsScanned,
+					 sycl::uint3 gridSize, sycl::uint3 gridSizeShift,
+					 sycl::uint3 gridSizeMask, sycl::float3 voxelSize,
+					 float isoValue, uint activeVoxels, uint maxVerts);
 
 extern "C" void allocateTextures(sycl::queue &q, uint **d_edgeTable, uint **d_triTable,
                                  uint **d_numVertsTable);
@@ -365,6 +360,7 @@ void initMC(int argc, char **argv) {
 
   printf("Starting `createVolumeTexture`\n");
   createVolumeTexture(d_volume, size);
+  
   printf("Finished loading volume data");
 #endif
 
@@ -421,18 +417,21 @@ void computeIsosurface() {
   int numBlocks = (numVoxels + threads - 1) / threads;
 
   numBlocks = std::min(numBlocks, 65535);
+  
+  // used w/ nd range
+  //sycl::range<3> grid(numBlocks, 1, 1);
+  //sycl::range<3> threads_range(threads, 1, 1);
 
-  sycl::range<3> grid(numBlocks, 1, 1);
-  sycl::range<3> threads_range(threads, 1, 1);
+  sycl::range<3> globalRange(numBlocks, 1, threads);
 
   // get around maximum grid size of 65535 in each dimension
-  if (grid[0] > 65535) {
-    grid[1] = grid[0] / 32768;
-    grid[0] = 32768;
-  }
+  //if (grid[0] > 65535) {
+    //grid[1] = grid[0] / 32768;
+    //grid[0] = 32768;
+  //}
   printf("Starting `launch_classifyVoxel`");
   // calculate number of vertices need per voxel
-  launch_classifyVoxel(q, grid, threads_range, d_voxelVerts, d_voxelOccupied, d_volume,
+  launch_classifyVoxel(q, globalRange, d_voxelVerts, d_voxelOccupied, d_volume,
                        gridSize, gridSizeShift, gridSizeMask, numVoxels,
                        voxelSize, isoValue);
   printf("Finished `launch_classifyVoxel`");
@@ -467,7 +466,7 @@ void computeIsosurface() {
   }
 
   // compact voxel index array
-  launch_compactVoxels(q, grid, threads_range, d_compVoxelArray, d_voxelOccupied,
+  launch_compactVoxels(q, globalRange, d_compVoxelArray, d_voxelOccupied,
                        d_voxelOccupiedScan, numVoxels);
   q.wait();
 
@@ -491,20 +490,19 @@ void computeIsosurface() {
 
   // generate triangles, writing to vertex buffers
 #if SKIP_EMPTY_VOXELS
-  sycl::range<3> grid2((int)ceil(activeVoxels / (float)NTHREADS), 1, 1);
+  sycl::range<3> globalRange2((int)ceil(activeVoxels / (float)NTHREADS), 1, NTHREADS);
 #else
-  sycl::range<3> grid2((int)ceil(numVoxels / (float)NTHREADS), 1, 1);
+  sycl::range<3> globalRange2((int)ceil(numVoxels / (float)NTHREADS), 1, NTHREADS);
 #endif
 
-  while (grid2[0] > 65535) {
-    grid2[0] /= 2;
-    grid2[1] *= 2;
+  while (globalRange2[0] > 65535) {
+    globalRange2[0] /= 2;
+    globalRange2[1] *= 2;
   }
 
-  launch_generateTriangles(q, grid2, threads_range, d_pos, d_normal, d_compVoxelArray,
+  launch_generateTriangles(q, globalRange2, d_pos, d_normal, d_compVoxelArray,
                            d_voxelVertsScan, gridSize, gridSizeShift,
                            gridSizeMask, voxelSize, isoValue, activeVoxels,
                            maxVerts);
   q.wait();
 }
-
